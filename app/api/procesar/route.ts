@@ -160,10 +160,7 @@ export async function POST(req: NextRequest) {
     }
 
     const client = new Client({
-      connectionString: dbUrl,
-      connection: {
-        timeout: 30000, // 30 second timeout
-      }
+      connectionString: dbUrl
     })
 
     try {
