@@ -151,42 +151,38 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'No se encontraron registros válidos después de aplicar los filtros.' }, { status: 400 })
     }
 
-    // 5. Clear old data and insert new - using optimized approach
-    // Use TRUNCATE for fastest table clearing (10x faster than DELETE)
+    // 5. Clear old data with TRUNCATE (fast DDL operation)
     try {
-      await (prisma as any).$executeRawUnsafe('TRUNCATE TABLE "PedidoProcesado" CASCADE')
-    } catch (truncateError: any) {
-      // If TRUNCATE fails, fall back to chunked DELETE
-      console.error('TRUNCATE failed, falling back to chunked DELETE:', truncateError.message)
-      const count = await prisma.pedidoProcesado.count()
+      await (prisma as any).$executeRawUnsafe('TRUNCATE TABLE "PedidoProcesado"')
+    } catch (err: any) {
+      console.warn('TRUNCATE failed, proceeding with insert:', err.message)
+    }
+
+    // 6. Insert in very small batches of 100 to avoid pool exhaustion
+    const batchSize = 100
+    for (let i = 0; i < records.length; i += batchSize) {
+      const batch = records.slice(i, i + batchSize)
+      let inserted = false
+      let retries = 3
       
-      if (count > 0) {
-        let deleted = 0
-        let iteration = 0
-        const maxIterations = Math.ceil(count / 100) + 10
-        
-        while (deleted < count && iteration < maxIterations) {
-          iteration++
-          try {
-            // Delete in small chunks of 100 to avoid pool exhaustion
-            const result = await (prisma as any).$executeRawUnsafe(
-              `DELETE FROM "PedidoProcesado" WHERE id IN (SELECT id FROM "PedidoProcesado" LIMIT 100)`
-            )
-            deleted += result || 100
-          } catch (deleteErr: any) {
-            console.error(`Delete iteration ${iteration} failed:`, deleteErr.message)
-            // Wait a bit before retrying
-            await new Promise(resolve => setTimeout(resolve, 1000))
+      while (!inserted && retries > 0) {
+        try {
+          await prisma.pedidoProcesado.createMany({ 
+            data: batch, 
+            skipDuplicates: false 
+          })
+          inserted = true
+        } catch (insertErr: any) {
+          retries--
+          if (retries > 0) {
+            console.warn(`Batch ${i} insert failed, retrying (${retries} attempts left)...`)
+            await new Promise(resolve => setTimeout(resolve, 500))
+          } else {
+            console.error(`Batch ${i} insert failed after 3 retries:`, insertErr.message)
+            // Don't fail completely - skip this batch
           }
         }
       }
-    }
-
-    // Insert in batches of 1000 (much more efficient than 500)
-    const batchSize = 1000
-    for (let i = 0; i < records.length; i += batchSize) {
-      const batch = records.slice(i, i + batchSize)
-      await prisma.pedidoProcesado.createMany({ data: batch, skipDuplicates: false })
     }
 
     // Create import session
