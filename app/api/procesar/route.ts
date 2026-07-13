@@ -151,74 +151,89 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'No se encontraron registros válidos después de aplicar los filtros.' }, { status: 400 })
     }
 
-    // 5. Use explicit transaction to keep a single connection
-    // This avoids pool exhaustion from multiple concurrent connections
-    const result = await (prisma as any).$transaction(async (tx: any) => {
-      // Clear old data with TRUNCATE (fast DDL operation)
-      try {
-        await tx.$executeRawUnsafe('TRUNCATE TABLE "PedidoProcesado"')
-        console.log('✓ Table truncated')
-      } catch (err: any) {
-        console.warn('TRUNCATE failed, proceeding with insert:', err.message)
-      }
+    // 5. Clear old data and insert new data in a single operation
+    // Using a single large INSERT avoids multiple connection pool requests
+    
+    // First, TRUNCATE the table
+    try {
+      await prisma.$executeRawUnsafe('TRUNCATE TABLE "PedidoProcesado"')
+      console.log('✓ Table truncated successfully')
+    } catch (truncateErr: any) {
+      console.warn('⚠️  TRUNCATE warning (non-critical):', truncateErr.message)
+    }
 
-      // Use raw SQL batch inserts for better performance
-      const batchSize = 100
-      let successCount = 0
+    // Build a massive INSERT statement with ALL records at once
+    if (records.length > 0) {
+      console.log(`📊 Preparing to insert ${records.length} records in a single batch...`)
       
-      for (let i = 0; i < records.length; i += batchSize) {
-        const batch = records.slice(i, i + batchSize)
-        
-        // Build SQL insert statement
-        let sqlInsert = `INSERT INTO "PedidoProcesado" (`
-        const columns = Object.keys(batch[0])
-        sqlInsert += columns.map(c => `"${c}"`).join(', ')
-        sqlInsert += `) VALUES `
-        
-        const values: string[] = []
-        batch.forEach((record, idx) => {
-          const recordValues = columns.map(col => {
-            const val = record[col]
-            if (val === null || val === undefined) return 'NULL'
-            if (typeof val === 'string') return `'${val.replace(/'/g, "''")}'`
-            if (typeof val === 'number') return val.toString()
-            if (typeof val === 'boolean') return val ? 'TRUE' : 'FALSE'
-            if (val instanceof Date) return `'${val.toISOString()}'`
-            return `'${String(val).replace(/'/g, "''")}'`
-          })
-          values.push(`(${recordValues.join(', ')})`)
+      const columns = Object.keys(records[0])
+      let sqlInsert = `INSERT INTO "PedidoProcesado" (${columns.map(c => `"${c}"`).join(', ')}) VALUES `
+      
+      const values: string[] = []
+      records.forEach((record) => {
+        const recordValues = columns.map(col => {
+          const val = record[col]
+          if (val === null || val === undefined) return 'NULL'
+          if (typeof val === 'string') return `'${val.replace(/'/g, "''")}'`
+          if (typeof val === 'number') return val.toString()
+          if (typeof val === 'boolean') return val ? 'TRUE' : 'FALSE'
+          if (val instanceof Date) return `'${val.toISOString()}'`
+          return `'${String(val).replace(/'/g, "''")}'`
         })
+        values.push(`(${recordValues.join(', ')})`)
+      })
+      
+      sqlInsert += values.join(', ')
+      
+      console.log(`⏳ Executing massive INSERT (${sqlInsert.length} bytes of SQL)...`)
+      try {
+        await prisma.$executeRawUnsafe(sqlInsert)
+        console.log(`✅ All ${records.length} records inserted successfully`)
+      } catch (insertErr: any) {
+        console.error('❌ Massive INSERT failed:', insertErr.message)
+        // If massive insert fails, try smaller chunks
+        console.log('🔄 Fallback: Trying chunked inserts (10 records at a time)...')
         
-        sqlInsert += values.join(', ')
+        const smallChunkSize = 10
+        let insertedCount = 0
         
-        let inserted = false
-        let retries = 2
-        
-        while (!inserted && retries > 0) {
+        for (let i = 0; i < records.length; i += smallChunkSize) {
+          const chunk = records.slice(i, i + smallChunkSize)
+          const chunkColumns = Object.keys(chunk[0])
+          let chunkSql = `INSERT INTO "PedidoProcesado" (${chunkColumns.map(c => `"${c}"`).join(', ')}) VALUES `
+          
+          const chunkValues: string[] = []
+          chunk.forEach((record) => {
+            const recordValues = chunkColumns.map(col => {
+              const val = record[col]
+              if (val === null || val === undefined) return 'NULL'
+              if (typeof val === 'string') return `'${val.replace(/'/g, "''")}'`
+              if (typeof val === 'number') return val.toString()
+              if (typeof val === 'boolean') return val ? 'TRUE' : 'FALSE'
+              if (val instanceof Date) return `'${val.toISOString()}'`
+              return `'${String(val).replace(/'/g, "''")}'`
+            })
+            chunkValues.push(`(${recordValues.join(', ')})`)
+          })
+          
+          chunkSql += chunkValues.join(', ')
+          
           try {
-            await tx.$executeRawUnsafe(sqlInsert)
-            inserted = true
-            successCount += batch.length
-            console.log(`✓ Batch ${i} (${batch.length} records) inserted. Total: ${successCount}`)
-          } catch (insertErr: any) {
-            retries--
-            if (retries > 0) {
-              console.warn(`Batch ${i} insert failed, waiting 1s before retry...`)
-              await new Promise(resolve => setTimeout(resolve, 1000))
-            } else {
-              console.warn(`Batch ${i} insert failed after retries, skipping`)
+            await prisma.$executeRawUnsafe(chunkSql)
+            insertedCount += chunk.length
+            console.log(`  ✓ Chunk ${i}-${i + chunk.length}: ${insertedCount}/${records.length}`)
+            
+            // Small delay between chunks
+            if (i + smallChunkSize < records.length) {
+              await new Promise(resolve => setTimeout(resolve, 500))
             }
+          } catch (chunkErr: any) {
+            console.error(`  ✗ Chunk ${i} failed:`, chunkErr.message)
+            // Skip this chunk and continue
           }
         }
-        
-        // Smaller wait time between batches when in transaction
-        if (i + batchSize < records.length) {
-          await new Promise(resolve => setTimeout(resolve, 100))
-        }
       }
-      
-      return successCount
-    })
+    }
 
     // Create import session
     await prisma.sesionImportacion.create({
