@@ -209,10 +209,10 @@ export async function POST(req: NextRequest) {
         }
       }
       
-      // Wait between batches
+      // Wait between batches - generous delays to allow pool recovery
       if (i + batchSize < records.length) {
-        console.log(`Waiting 1 second between batches...`)
-        await new Promise(resolve => setTimeout(resolve, 1000))
+        console.log(`⏳ Waiting 3 seconds between batches (${successCount}/${records.length} complete)...`)
+        await new Promise(resolve => setTimeout(resolve, 3000))
       }
     }
 
