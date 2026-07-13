@@ -1,0 +1,18 @@
+{
+  "/_not-found/page": "app/_not-found/page.js",
+  "/page": "app/page.js",
+  "/api/dashboard/por-fecha/route": "app/api/dashboard/por-fecha/route.js",
+  "/api/dashboard/marca-canales/route": "app/api/dashboard/marca-canales/route.js",
+  "/api/dashboard/canal-pedidos/route": "app/api/dashboard/canal-pedidos/route.js",
+  "/api/dashboard/por-categoria/route": "app/api/dashboard/por-categoria/route.js",
+  "/api/dashboard/por-marca/route": "app/api/dashboard/por-marca/route.js",
+  "/api/dashboard/por-canal/route": "app/api/dashboard/por-canal/route.js",
+  "/api/dashboard/resumen/route": "app/api/dashboard/resumen/route.js",
+  "/api/procesar/route": "app/api/procesar/route.js",
+  "/dashboard/por-categoria/page": "app/dashboard/por-categoria/page.js",
+  "/dashboard/page": "app/dashboard/page.js",
+  "/dashboard/por-canal/page": "app/dashboard/por-canal/page.js",
+  "/importar/page": "app/importar/page.js",
+  "/dashboard/por-marca/page": "app/dashboard/por-marca/page.js",
+  "/dashboard/por-fecha/page": "app/dashboard/por-fecha/page.js"
+}
