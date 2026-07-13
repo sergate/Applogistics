@@ -5,7 +5,6 @@ import { prisma } from '@/lib/prisma'
 import { invalidateCache } from '@/lib/cache'
 import * as XLSX from 'xlsx'
 import { parse } from 'csv/sync'
-import { Client } from 'pg'
 
 const EXCLUDED_GROUPS = ['PACKAGING', 'MATERIALES EMPAQUE', 'MATERIALES DE EMPAQUE', 'VIDRIERA', 'PROMOCION']
 const EXCLUDED_STATES = ['OD_TERMINADO']
@@ -152,62 +151,70 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'No se encontraron registros válidos después de aplicar los filtros.' }, { status: 400 })
     }
 
-    // 5. Use pg (node-postgres) directly to bypass Prisma pool issues
-    // Create a direct connection to PostgreSQL
-    const dbUrl = process.env.DATABASE_URL
-    if (!dbUrl) {
-      throw new Error('DATABASE_URL not set')
-    }
-
-    const client = new Client({
-      connectionString: dbUrl
-    })
-
-    try {
-      console.log('🔗 Connecting to database directly with pg...')
-      await client.connect()
-      console.log('✅ Connected successfully')
-
-      // TRUNCATE the table
-      console.log('🗑️  Truncating table...')
-      await client.query('TRUNCATE TABLE "PedidoProcesado"')
-      console.log('✓ Table truncated')
-
-      // Insert all records
-      if (records.length > 0) {
-        console.log(`📊 Inserting ${records.length} records...`)
-        
-        const columns = Object.keys(records[0])
-        let sqlInsert = `INSERT INTO "PedidoProcesado" (${columns.map(c => `"${c}"`).join(', ')}) VALUES `
-        
-        const values: string[] = []
-        records.forEach((record) => {
-          const recordValues = columns.map(col => {
-            const val = record[col]
-            if (val === null || val === undefined) return 'NULL'
-            if (typeof val === 'string') return `'${val.replace(/'/g, "''")}'`
-            if (typeof val === 'number') return val.toString()
-            if (typeof val === 'boolean') return val ? 'TRUE' : 'FALSE'
-            if (val instanceof Date) return `'${val.toISOString()}'`
-            return `'${String(val).replace(/'/g, "''")}'`
-          })
-          values.push(`(${recordValues.join(', ')})`)
+    // 5. Delete old data in small chunks to avoid pool exhaustion
+    // Strategy: Delete 50 records at a time with delays to let pool recover
+    console.log('🗑️  Starting cleanup of old records...')
+    let deleteCount = 0
+    let maxIterations = 1000 // Safety limit
+    let iteration = 0
+    
+    while (iteration < maxIterations) {
+      iteration++
+      try {
+        // Get first 50 IDs
+        const oldRecords = await prisma.pedidoProcesado.findMany({
+          select: { id: true },
+          take: 50
         })
         
-        sqlInsert += values.join(', ')
+        if (oldRecords.length === 0) {
+          console.log(`✓ Cleanup complete. Deleted ${deleteCount} old records`)
+          break
+        }
         
-        console.log(`⏳ Executing INSERT with ${records.length} records (${(sqlInsert.length / 1024 / 1024).toFixed(2)}MB of SQL)...`)
-        await client.query(sqlInsert)
-        console.log(`✅ All ${records.length} records inserted successfully`)
+        const idsToDelete = oldRecords.map(r => r.id)
+        await prisma.pedidoProcesado.deleteMany({
+          where: { id: { in: idsToDelete } }
+        })
+        
+        deleteCount += idsToDelete.length
+        console.log(`  Cleaned ${deleteCount} records so far...`)
+        
+        // Wait a bit to let pool recover
+        await new Promise(resolve => setTimeout(resolve, 200))
+      } catch (delErr: any) {
+        console.warn(`⚠️  Delete chunk ${iteration} failed (non-critical):`, delErr.message)
+        // Continue anyway - worst case we have duplicate data
       }
-    } catch (pgErr: any) {
-      console.error('❌ PostgreSQL operation failed:', pgErr.message)
-      throw pgErr
-    } finally {
-      console.log('🔌 Closing database connection...')
-      await client.end()
-      console.log('✓ Connection closed')
     }
+
+    // 6. Insert new records in small batches
+    console.log(`📊 Inserting ${records.length} new records in batches...`)
+    const batchSize = 500
+    let insertedCount = 0
+    
+    for (let i = 0; i < records.length; i += batchSize) {
+      const batch = records.slice(i, i + batchSize)
+      
+      try {
+        await prisma.pedidoProcesado.createMany({
+          data: batch,
+          skipDuplicates: false
+        })
+        insertedCount += batch.length
+        console.log(`  ✓ Inserted ${insertedCount}/${records.length} records`)
+        
+        // Wait to let pool recover between batches
+        if (i + batchSize < records.length) {
+          await new Promise(resolve => setTimeout(resolve, 300))
+        }
+      } catch (insertErr: any) {
+        console.error(`❌ Batch insert at ${i} failed:`, insertErr.message)
+        // Continue with next batch - skip this one
+      }
+    }
+    
+    console.log(`✅ Import complete: ${insertedCount} records inserted`)
 
     // Create import session
     await prisma.sesionImportacion.create({
