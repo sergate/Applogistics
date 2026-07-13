@@ -1,0 +1,60 @@
+generator client {
+    provider = "prisma-client-js"
+    binaryTargets = ["native", "linux-musl-arm64-openssl-3.0.x"]
+    output = "/home/ubuntu/analisis_logistica_app/nextjs_space/node_modules/.prisma/client"
+}
+
+datasource db {
+    provider = "postgresql"
+    url      = env("DATABASE_URL")
+}
+
+model SesionImportacion {
+  id        String   @id @default(cuid())
+  fecha     DateTime @default(now())
+  archClientes   String?
+  archTienda     String?
+  archGrupo      String?
+  totalRegistros Int      @default(0)
+  createdAt DateTime @default(now())
+}
+
+model PedidoProcesado {
+  id                    String   @id @default(cuid())
+  sesionId              String?
+  pedido                String
+  nombrePedido          String?
+  tipo                  String?
+  grupo                 String
+  sector                String?
+  seller                String
+  estadoPedido          String
+  fechaCreacion         DateTime?
+  codigoTienda          String?
+  nombreCliente         String?
+  canal                 String?
+  oollAsignado          String?
+  esRetira              String?
+  unidades              Int      @default(0)
+  unidadesPlan          Int      @default(0)
+  unidadesPickeadas     Int      @default(0)
+  unidadesSeparadas     Int      @default(0)
+  unidadesPendientes    Int      @default(0)
+  pendientePicking      Int      @default(0)
+  pendienteSeparacion   Int      @default(0)
+  eficienciaPicking     Float    @default(0)
+  eficienciaSeparacion  Float    @default(0)
+  createdAt             DateTime @default(now())
+
+  @@index([seller])
+  @@index([canal])
+  @@index([grupo])
+  @@index([fechaCreacion])
+  @@index([estadoPedido])
+  @@index([pedido])
+  // Composite indexes for groupBy queries
+  @@index([seller, grupo])
+  @@index([canal, seller])
+  @@index([fechaCreacion, seller])
+  @@index([canal, estadoPedido])
+}
