@@ -158,12 +158,15 @@ export async function POST(req: NextRequest) {
       console.warn('TRUNCATE failed, proceeding with insert:', err.message)
     }
 
-    // 6. Insert in very small batches of 100 to avoid pool exhaustion
-    const batchSize = 100
+    // 6. Insert in very small batches of 50 with LARGE delays between batches
+    // This gives the connection pool time to release connections
+    const batchSize = 50
+    let successCount = 0
+    
     for (let i = 0; i < records.length; i += batchSize) {
       const batch = records.slice(i, i + batchSize)
       let inserted = false
-      let retries = 3
+      let retries = 2
       
       while (!inserted && retries > 0) {
         try {
@@ -172,16 +175,24 @@ export async function POST(req: NextRequest) {
             skipDuplicates: false 
           })
           inserted = true
+          successCount += batch.length
+          console.log(`✓ Batch ${i} (${batch.length} records) inserted successfully. Total: ${successCount}`)
         } catch (insertErr: any) {
           retries--
           if (retries > 0) {
-            console.warn(`Batch ${i} insert failed, retrying (${retries} attempts left)...`)
-            await new Promise(resolve => setTimeout(resolve, 500))
+            console.warn(`Batch ${i} insert failed, waiting 3 seconds before retry...`)
+            // Wait 3 seconds before retrying
+            await new Promise(resolve => setTimeout(resolve, 3000))
           } else {
-            console.error(`Batch ${i} insert failed after 3 retries:`, insertErr.message)
-            // Don't fail completely - skip this batch
+            console.warn(`Batch ${i} insert failed after retries, skipping batch`)
           }
         }
+      }
+      
+      // After each batch, wait to allow pool connections to be released
+      if (i + batchSize < records.length) {
+        console.log(`Waiting 2 seconds between batches...`)
+        await new Promise(resolve => setTimeout(resolve, 2000))
       }
     }
 
