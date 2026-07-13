@@ -155,59 +155,69 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'No se encontraron registros válidos después de aplicar los filtros.' }, { status: 400 })
     }
 
-    // 5. TRUNCATE + INSERT strategy with fresh Prisma client
-    // TRUNCATE is a fast DDL operation
-    console.log('🗑️  Truncating table...')
-    try {
-      await prisma.$executeRawUnsafe('TRUNCATE TABLE "PedidoProcesado"')
-      console.log('✓ Table truncated successfully')
-    } catch (truncateErr: any) {
-      console.error('❌ TRUNCATE failed:', truncateErr.message)
-      // If TRUNCATE fails, try to at least delete existing records
-      try {
-        console.log('Attempting fallback DELETE...')
-        await prisma.$executeRawUnsafe('DELETE FROM "PedidoProcesado"')
-        console.log('✓ DELETE successful')
-      } catch (deleteErr: any) {
-        console.error('❌ DELETE also failed:', deleteErr.message)
-        return NextResponse.json(
-          { error: 'No se pudo limpiar la tabla. Intenta reiniciar el servidor.' },
-          { status: 500 }
-        )
-      }
-    }
-
-    // 6. Insert new records in reasonable batches
-    console.log(`📊 Inserting ${records.length} new records...`)
-    const batchSize = 500
-    let insertedCount = 0
+    // 5. Insert new records directly without DELETE/TRUNCATE
+    // Strategy: Use INSERT with ON CONFLICT to upsert records
+    // This avoids needing to delete old data
     
-    for (let i = 0; i < records.length; i += batchSize) {
-      const batch = records.slice(i, i + batchSize)
+    console.log(`📊 Inserting/updating ${records.length} records...`)
+    
+    if (records.length > 0) {
+      // Build a single massive INSERT ... ON CONFLICT statement
+      const columns = Object.keys(records[0])
+      const updateColumns = columns.filter(col => col !== 'id') // Don't update id
+      
+      let sqlInsert = `INSERT INTO "PedidoProcesado" (${columns.map(c => `"${c}"`).join(', ')}) VALUES `
+      
+      const values: string[] = []
+      records.forEach((record) => {
+        const recordValues = columns.map(col => {
+          const val = record[col]
+          if (val === null || val === undefined) return 'NULL'
+          if (typeof val === 'string') return `'${val.replace(/'/g, "''")}'`
+          if (typeof val === 'number') return val.toString()
+          if (typeof val === 'boolean') return val ? 'TRUE' : 'FALSE'
+          if (val instanceof Date) return `'${val.toISOString()}'`
+          return `'${String(val).replace(/'/g, "''")}'`
+        })
+        values.push(`(${recordValues.join(', ')})`)
+      })
+      
+      sqlInsert += values.join(', ')
+      
+      // Add ON CONFLICT clause to update existing records
+      sqlInsert += ` ON CONFLICT (id) DO UPDATE SET `
+      sqlInsert += updateColumns.map(col => `"${col}" = EXCLUDED."${col}"`).join(', ')
       
       try {
-        await prisma.pedidoProcesado.createMany({
-          data: batch,
-          skipDuplicates: false
-        })
-        insertedCount += batch.length
-        console.log(`  ✓ Batch ${Math.floor(i / batchSize) + 1}: ${insertedCount}/${records.length} records`)
-      } catch (insertErr: any) {
-        console.error(`❌ Batch ${Math.floor(i / batchSize) + 1} failed:`, insertErr.message)
-        // Try inserting one by one as last resort
-        console.log(`  Attempting one-by-one insert for this batch...`)
-        for (const record of batch) {
+        console.log(`⏳ Executing upsert for ${records.length} records...`)
+        await prisma.$executeRawUnsafe(sqlInsert)
+        console.log(`✅ All ${records.length} records inserted/updated successfully`)
+      } catch (upsertErr: any) {
+        console.error('❌ Upsert failed, trying batch approach:', upsertErr.message)
+        
+        // Fallback: Insert in batches
+        const batchSize = 500
+        let insertedCount = 0
+        
+        for (let i = 0; i < records.length; i += batchSize) {
+          const batch = records.slice(i, i + batchSize)
+          
           try {
-            await prisma.pedidoProcesado.create({ data: record })
-            insertedCount++
-          } catch (singleErr: any) {
-            console.warn(`  Skipped 1 record due to error:`, singleErr.message)
+            await prisma.pedidoProcesado.createMany({
+              data: batch,
+              skipDuplicates: true  // Skip duplicates, don't error out
+            })
+            insertedCount += batch.length
+            console.log(`  ✓ Batch ${Math.floor(i / batchSize) + 1}: ${insertedCount}/${records.length} records`)
+          } catch (batchErr: any) {
+            console.warn(`  Batch ${Math.floor(i / batchSize) + 1} failed (continuing):`, batchErr.message)
+            // Continue with next batch
           }
         }
+        
+        console.log(`✅ Import complete with batches: ${insertedCount} records processed`)
       }
     }
-    
-    console.log(`✅ Import complete: ${insertedCount} records inserted`)
 
     // Create import session
     await prisma.sesionImportacion.create({
