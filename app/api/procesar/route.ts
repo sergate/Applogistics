@@ -152,16 +152,7 @@ export async function POST(req: NextRequest) {
     }
 
     // 5. Clear old data and insert new
-    // Use a more efficient delete strategy - delete in batches to avoid memory issues
-    const CHUNK_SIZE = 10000
-    let deletedTotal = 0
-    while (true) {
-      const deleted = await prisma.pedidoProcesado.deleteMany({
-        take: CHUNK_SIZE
-      })
-      deletedTotal += deleted.count
-      if (deleted.count === 0) break
-    }
+    await prisma.pedidoProcesado.deleteMany()
 
     // Insert in batches of 5000 (much more efficient than 500)
     const batchSize = 5000
