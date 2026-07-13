@@ -155,13 +155,31 @@ export async function POST(req: NextRequest) {
     // Use raw SQL DELETE for better performance and connection pool handling
     try {
       await (prisma as any).$executeRawUnsafe('DELETE FROM "PedidoProcesado"')
-    } catch {
-      // Fallback to deleteMany if raw query fails
-      await prisma.pedidoProcesado.deleteMany({})
+    } catch (deleteError: any) {
+      // Fallback to deleteMany with retries if raw query fails
+      let retries = 3
+      let lastError = deleteError
+      while (retries > 0) {
+        try {
+          await prisma.pedidoProcesado.deleteMany({})
+          lastError = null
+          break
+        } catch (err: any) {
+          lastError = err
+          retries--
+          if (retries > 0) {
+            // Wait before retry to allow connections to be released
+            await new Promise(resolve => setTimeout(resolve, 1000))
+          }
+        }
+      }
+      if (lastError) {
+        throw lastError
+      }
     }
 
-    // Insert in batches of 5000 (much more efficient than 500)
-    const batchSize = 5000
+    // Insert in batches of 1000 (reduced from 5000 to avoid connection pool exhaustion)
+    const batchSize = 1000
     for (let i = 0; i < records.length; i += batchSize) {
       const batch = records.slice(i, i + batchSize)
       await prisma.pedidoProcesado.createMany({ data: batch, skipDuplicates: false })
