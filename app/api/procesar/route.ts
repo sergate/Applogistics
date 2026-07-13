@@ -1,7 +1,7 @@
 export const dynamic = "force-dynamic";
 
 import { NextRequest, NextResponse } from 'next/server'
-import { prisma } from '@/lib/prisma'
+import { PrismaClient } from '@prisma/client'
 import { invalidateCache } from '@/lib/cache'
 import * as XLSX from 'xlsx'
 import { parse } from 'csv/sync'
@@ -25,6 +25,10 @@ function cleanInt(val: any): number {
 }
 
 export async function POST(req: NextRequest) {
+  // Create a fresh Prisma Client for this operation only
+  // This avoids the exhausted connection pool from the shared instance
+  const prisma = new PrismaClient()
+  
   try {
     const formData = await req.formData()
     const clientesFile = formData.get('clientes') as File | null
@@ -151,20 +155,31 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'No se encontraron registros válidos después de aplicar los filtros.' }, { status: 400 })
     }
 
-    // 5. TRUNCATE old data (very fast) then insert new records
-    // TRUNCATE is a DDL operation and is much faster than DELETE
+    // 5. TRUNCATE + INSERT strategy with fresh Prisma client
+    // TRUNCATE is a fast DDL operation
     console.log('🗑️  Truncating table...')
     try {
       await prisma.$executeRawUnsafe('TRUNCATE TABLE "PedidoProcesado"')
       console.log('✓ Table truncated successfully')
     } catch (truncateErr: any) {
-      console.warn('⚠️  TRUNCATE failed (will proceed with insert):', truncateErr.message)
-      // Continue anyway - worst case we have duplicate data
+      console.error('❌ TRUNCATE failed:', truncateErr.message)
+      // If TRUNCATE fails, try to at least delete existing records
+      try {
+        console.log('Attempting fallback DELETE...')
+        await prisma.$executeRawUnsafe('DELETE FROM "PedidoProcesado"')
+        console.log('✓ DELETE successful')
+      } catch (deleteErr: any) {
+        console.error('❌ DELETE also failed:', deleteErr.message)
+        return NextResponse.json(
+          { error: 'No se pudo limpiar la tabla. Intenta reiniciar el servidor.' },
+          { status: 500 }
+        )
+      }
     }
 
-    // 6. Insert new records in small batches with longer delays
-    console.log(`📊 Inserting ${records.length} new records in batches...`)
-    const batchSize = 300
+    // 6. Insert new records in reasonable batches
+    console.log(`📊 Inserting ${records.length} new records...`)
+    const batchSize = 500
     let insertedCount = 0
     
     for (let i = 0; i < records.length; i += batchSize) {
@@ -176,17 +191,19 @@ export async function POST(req: NextRequest) {
           skipDuplicates: false
         })
         insertedCount += batch.length
-        console.log(`  ✓ Batch ${Math.floor(i / batchSize) + 1}: Inserted ${insertedCount}/${records.length} records`)
-        
-        // Longer wait to let pool recover between batches
-        if (i + batchSize < records.length) {
-          console.log(`     Waiting 2 seconds for pool recovery...`)
-          await new Promise(resolve => setTimeout(resolve, 2000))
-        }
+        console.log(`  ✓ Batch ${Math.floor(i / batchSize) + 1}: ${insertedCount}/${records.length} records`)
       } catch (insertErr: any) {
-        console.error(`❌ Batch ${Math.floor(i / batchSize) + 1} insert failed:`, insertErr.message)
-        // Continue with next batch - skip this one
-        console.log(`    Skipping this batch and continuing...`)
+        console.error(`❌ Batch ${Math.floor(i / batchSize) + 1} failed:`, insertErr.message)
+        // Try inserting one by one as last resort
+        console.log(`  Attempting one-by-one insert for this batch...`)
+        for (const record of batch) {
+          try {
+            await prisma.pedidoProcesado.create({ data: record })
+            insertedCount++
+          } catch (singleErr: any) {
+            console.warn(`  Skipped 1 record due to error:`, singleErr.message)
+          }
+        }
       }
     }
     
@@ -215,5 +232,9 @@ export async function POST(req: NextRequest) {
       { error: `Error al procesar los archivos: ${error?.message ?? 'Error desconocido'}` },
       { status: 500 }
     )
+  } finally {
+    // Always disconnect the Prisma client to free resources
+    await prisma.$disconnect()
+    console.log('🔌 Prisma client disconnected')
   }
 }
