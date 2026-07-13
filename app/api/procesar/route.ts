@@ -5,6 +5,7 @@ import { prisma } from '@/lib/prisma'
 import { invalidateCache } from '@/lib/cache'
 import * as XLSX from 'xlsx'
 import { parse } from 'csv/sync'
+import { Client } from 'pg'
 
 const EXCLUDED_GROUPS = ['PACKAGING', 'MATERIALES EMPAQUE', 'MATERIALES DE EMPAQUE', 'VIDRIERA', 'PROMOCION']
 const EXCLUDED_STATES = ['OD_TERMINADO']
@@ -151,88 +152,64 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'No se encontraron registros válidos después de aplicar los filtros.' }, { status: 400 })
     }
 
-    // 5. Clear old data and insert new data in a single operation
-    // Using a single large INSERT avoids multiple connection pool requests
-    
-    // First, TRUNCATE the table
-    try {
-      await prisma.$executeRawUnsafe('TRUNCATE TABLE "PedidoProcesado"')
-      console.log('✓ Table truncated successfully')
-    } catch (truncateErr: any) {
-      console.warn('⚠️  TRUNCATE warning (non-critical):', truncateErr.message)
+    // 5. Use pg (node-postgres) directly to bypass Prisma pool issues
+    // Create a direct connection to PostgreSQL
+    const dbUrl = process.env.DATABASE_URL
+    if (!dbUrl) {
+      throw new Error('DATABASE_URL not set')
     }
 
-    // Build a massive INSERT statement with ALL records at once
-    if (records.length > 0) {
-      console.log(`📊 Preparing to insert ${records.length} records in a single batch...`)
-      
-      const columns = Object.keys(records[0])
-      let sqlInsert = `INSERT INTO "PedidoProcesado" (${columns.map(c => `"${c}"`).join(', ')}) VALUES `
-      
-      const values: string[] = []
-      records.forEach((record) => {
-        const recordValues = columns.map(col => {
-          const val = record[col]
-          if (val === null || val === undefined) return 'NULL'
-          if (typeof val === 'string') return `'${val.replace(/'/g, "''")}'`
-          if (typeof val === 'number') return val.toString()
-          if (typeof val === 'boolean') return val ? 'TRUE' : 'FALSE'
-          if (val instanceof Date) return `'${val.toISOString()}'`
-          return `'${String(val).replace(/'/g, "''")}'`
-        })
-        values.push(`(${recordValues.join(', ')})`)
-      })
-      
-      sqlInsert += values.join(', ')
-      
-      console.log(`⏳ Executing massive INSERT (${sqlInsert.length} bytes of SQL)...`)
-      try {
-        await prisma.$executeRawUnsafe(sqlInsert)
-        console.log(`✅ All ${records.length} records inserted successfully`)
-      } catch (insertErr: any) {
-        console.error('❌ Massive INSERT failed:', insertErr.message)
-        // If massive insert fails, try smaller chunks
-        console.log('🔄 Fallback: Trying chunked inserts (10 records at a time)...')
-        
-        const smallChunkSize = 10
-        let insertedCount = 0
-        
-        for (let i = 0; i < records.length; i += smallChunkSize) {
-          const chunk = records.slice(i, i + smallChunkSize)
-          const chunkColumns = Object.keys(chunk[0])
-          let chunkSql = `INSERT INTO "PedidoProcesado" (${chunkColumns.map(c => `"${c}"`).join(', ')}) VALUES `
-          
-          const chunkValues: string[] = []
-          chunk.forEach((record) => {
-            const recordValues = chunkColumns.map(col => {
-              const val = record[col]
-              if (val === null || val === undefined) return 'NULL'
-              if (typeof val === 'string') return `'${val.replace(/'/g, "''")}'`
-              if (typeof val === 'number') return val.toString()
-              if (typeof val === 'boolean') return val ? 'TRUE' : 'FALSE'
-              if (val instanceof Date) return `'${val.toISOString()}'`
-              return `'${String(val).replace(/'/g, "''")}'`
-            })
-            chunkValues.push(`(${recordValues.join(', ')})`)
-          })
-          
-          chunkSql += chunkValues.join(', ')
-          
-          try {
-            await prisma.$executeRawUnsafe(chunkSql)
-            insertedCount += chunk.length
-            console.log(`  ✓ Chunk ${i}-${i + chunk.length}: ${insertedCount}/${records.length}`)
-            
-            // Small delay between chunks
-            if (i + smallChunkSize < records.length) {
-              await new Promise(resolve => setTimeout(resolve, 500))
-            }
-          } catch (chunkErr: any) {
-            console.error(`  ✗ Chunk ${i} failed:`, chunkErr.message)
-            // Skip this chunk and continue
-          }
-        }
+    const client = new Client({
+      connectionString: dbUrl,
+      connection: {
+        timeout: 30000, // 30 second timeout
       }
+    })
+
+    try {
+      console.log('🔗 Connecting to database directly with pg...')
+      await client.connect()
+      console.log('✅ Connected successfully')
+
+      // TRUNCATE the table
+      console.log('🗑️  Truncating table...')
+      await client.query('TRUNCATE TABLE "PedidoProcesado"')
+      console.log('✓ Table truncated')
+
+      // Insert all records
+      if (records.length > 0) {
+        console.log(`📊 Inserting ${records.length} records...`)
+        
+        const columns = Object.keys(records[0])
+        let sqlInsert = `INSERT INTO "PedidoProcesado" (${columns.map(c => `"${c}"`).join(', ')}) VALUES `
+        
+        const values: string[] = []
+        records.forEach((record) => {
+          const recordValues = columns.map(col => {
+            const val = record[col]
+            if (val === null || val === undefined) return 'NULL'
+            if (typeof val === 'string') return `'${val.replace(/'/g, "''")}'`
+            if (typeof val === 'number') return val.toString()
+            if (typeof val === 'boolean') return val ? 'TRUE' : 'FALSE'
+            if (val instanceof Date) return `'${val.toISOString()}'`
+            return `'${String(val).replace(/'/g, "''")}'`
+          })
+          values.push(`(${recordValues.join(', ')})`)
+        })
+        
+        sqlInsert += values.join(', ')
+        
+        console.log(`⏳ Executing INSERT with ${records.length} records (${(sqlInsert.length / 1024 / 1024).toFixed(2)}MB of SQL)...`)
+        await client.query(sqlInsert)
+        console.log(`✅ All ${records.length} records inserted successfully`)
+      }
+    } catch (pgErr: any) {
+      console.error('❌ PostgreSQL operation failed:', pgErr.message)
+      throw pgErr
+    } finally {
+      console.log('🔌 Closing database connection...')
+      await client.end()
+      console.log('✓ Connection closed')
     }
 
     // Create import session
