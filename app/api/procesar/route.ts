@@ -151,46 +151,20 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'No se encontraron registros válidos después de aplicar los filtros.' }, { status: 400 })
     }
 
-    // 5. Delete old data in small chunks to avoid pool exhaustion
-    // Strategy: Delete 50 records at a time with delays to let pool recover
-    console.log('🗑️  Starting cleanup of old records...')
-    let deleteCount = 0
-    let maxIterations = 1000 // Safety limit
-    let iteration = 0
-    
-    while (iteration < maxIterations) {
-      iteration++
-      try {
-        // Get first 50 IDs
-        const oldRecords = await prisma.pedidoProcesado.findMany({
-          select: { id: true },
-          take: 50
-        })
-        
-        if (oldRecords.length === 0) {
-          console.log(`✓ Cleanup complete. Deleted ${deleteCount} old records`)
-          break
-        }
-        
-        const idsToDelete = oldRecords.map(r => r.id)
-        await prisma.pedidoProcesado.deleteMany({
-          where: { id: { in: idsToDelete } }
-        })
-        
-        deleteCount += idsToDelete.length
-        console.log(`  Cleaned ${deleteCount} records so far...`)
-        
-        // Wait a bit to let pool recover
-        await new Promise(resolve => setTimeout(resolve, 200))
-      } catch (delErr: any) {
-        console.warn(`⚠️  Delete chunk ${iteration} failed (non-critical):`, delErr.message)
-        // Continue anyway - worst case we have duplicate data
-      }
+    // 5. TRUNCATE old data (very fast) then insert new records
+    // TRUNCATE is a DDL operation and is much faster than DELETE
+    console.log('🗑️  Truncating table...')
+    try {
+      await prisma.$executeRawUnsafe('TRUNCATE TABLE "PedidoProcesado"')
+      console.log('✓ Table truncated successfully')
+    } catch (truncateErr: any) {
+      console.warn('⚠️  TRUNCATE failed (will proceed with insert):', truncateErr.message)
+      // Continue anyway - worst case we have duplicate data
     }
 
-    // 6. Insert new records in small batches
+    // 6. Insert new records in small batches with longer delays
     console.log(`📊 Inserting ${records.length} new records in batches...`)
-    const batchSize = 500
+    const batchSize = 300
     let insertedCount = 0
     
     for (let i = 0; i < records.length; i += batchSize) {
@@ -202,15 +176,17 @@ export async function POST(req: NextRequest) {
           skipDuplicates: false
         })
         insertedCount += batch.length
-        console.log(`  ✓ Inserted ${insertedCount}/${records.length} records`)
+        console.log(`  ✓ Batch ${Math.floor(i / batchSize) + 1}: Inserted ${insertedCount}/${records.length} records`)
         
-        // Wait to let pool recover between batches
+        // Longer wait to let pool recover between batches
         if (i + batchSize < records.length) {
-          await new Promise(resolve => setTimeout(resolve, 300))
+          console.log(`     Waiting 2 seconds for pool recovery...`)
+          await new Promise(resolve => setTimeout(resolve, 2000))
         }
       } catch (insertErr: any) {
-        console.error(`❌ Batch insert at ${i} failed:`, insertErr.message)
+        console.error(`❌ Batch ${Math.floor(i / batchSize) + 1} insert failed:`, insertErr.message)
         // Continue with next batch - skip this one
+        console.log(`    Skipping this batch and continuing...`)
       }
     }
     
