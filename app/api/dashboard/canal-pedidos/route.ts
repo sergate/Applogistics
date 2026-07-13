@@ -4,6 +4,18 @@ import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/prisma'
 import { getCache, setCache, getCacheKey } from '@/lib/cache'
 
+// Definimos la estructura del cliente para evitar usar 'any'
+interface ClienteAgrupado {
+  nombreCliente: string
+  codigoTienda: string
+  unidades: number
+  pickeadas: number
+  separadas: number
+  pendientePicking: number
+  pendienteSeparacion: number
+  pedidos: number
+}
+
 export async function GET(req: NextRequest) {
   try {
     const seller = req.nextUrl.searchParams.get('seller') ?? ''
@@ -39,20 +51,12 @@ export async function GET(req: NextRequest) {
     })
 
     // Group by client (nombreCliente + codigoTienda)
-    const clienteMap = new Map<string, {
-      nombreCliente: string
-      codigoTienda: string
-      unidades: number
-      pickeadas: number
-      separadas: number
-      pendientePicking: number
-      pendienteSeparacion: number
-      pedidos: number
-    }>()
+    const clienteMap = new Map<string, ClienteAgrupado>()
 
     for (const r of records ?? []) {
       const key = r?.codigoTienda ?? r?.nombreCliente ?? 'SIN_CODIGO'
       const existing = clienteMap.get(key)
+      
       if (existing) {
         existing.unidades += r?.unidades ?? 0
         existing.pickeadas += r?.unidadesPickeadas ?? 0
@@ -74,16 +78,24 @@ export async function GET(req: NextRequest) {
       }
     }
 
-    const result = Array.from(clienteMap.values()).map((c: any) => {
-      const uni = c?.unidades ?? 0
-      const pick = c?.pickeadas ?? 0
-      const sep = c?.separadas ?? 0
-      return {
-        ...c,
-        eficienciaPicking: uni > 0 ? Math.round((pick / uni) * 10000) / 100 : 0,
-        eficienciaSeparacion: uni > 0 ? Math.round((sep / uni) * 10000) / 100 : 0,
-      }
-    }).sort((a: any, b: any) => (b?.unidades ?? 0) - (a?.unidades ?? 0))
+    // Mapeo y cálculo de eficiencias con tipado seguro
+    const result = Array.from(clienteMap.values())
+      .map((c) => {
+        const uni = c.unidades
+        const pick = c.pickeadas
+        const sep = c.separadas
+        
+        // Calculamos porcentaje y limitamos opcionalmente al 100% para evitar desbordes visuales
+        const efipick = uni > 0 ? Math.round((pick / uni) * 10000) / 100 : 0
+        const efisep = uni > 0 ? Math.round((sep / uni) * 10000) / 100 : 0
+
+        return {
+          ...c,
+          eficienciaPicking: Math.min(efipick, 100),
+          eficienciaSeparacion: Math.min(efisep, 100),
+        }
+      })
+      .sort((a, b) => b.unidades - a.unidades) // Ordenamiento numérico limpio
 
     const responseData = { pedidos: result }
 
