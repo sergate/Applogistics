@@ -1,1 +1,1 @@
-{"version":1,"functions":{"/api/dashboard/canal-pedidos":{},"/api/dashboard/por-fecha":{},"/api/dashboard/por-marca":{},"/api/dashboard/por-categoria":{},"/api/dashboard/por-canal":{},"/api/dashboard/marca-canales":{},"/api/procesar":{},"/api/dashboard/resumen":{}}}
+{"version":1,"functions":{"/api/dashboard/canal-pedidos":{},"/api/dashboard/por-canal":{},"/api/dashboard/por-categoria":{},"/api/dashboard/marca-canales":{},"/api/dashboard/resumen":{},"/api/dashboard/por-fecha":{},"/api/dashboard/por-marca":{},"/api/procesar":{}}}
