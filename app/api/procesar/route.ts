@@ -151,8 +151,14 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'No se encontraron registros válidos después de aplicar los filtros.' }, { status: 400 })
     }
 
-    // 5. Clear old data and insert new
-    await prisma.pedidoProcesado.deleteMany()
+    // 5. Clear old data and insert new - using optimized approach
+    // Use raw SQL DELETE for better performance and connection pool handling
+    try {
+      await (prisma as any).$executeRawUnsafe('DELETE FROM "PedidoProcesado"')
+    } catch {
+      // Fallback to deleteMany if raw query fails
+      await prisma.pedidoProcesado.deleteMany({})
+    }
 
     // Insert in batches of 5000 (much more efficient than 500)
     const batchSize = 5000
